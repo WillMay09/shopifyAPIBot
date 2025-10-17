@@ -2,15 +2,6 @@ import fetch from "node-fetch";
 import open from "open";
 import puppeteer from "puppeteer";
 
-//const puppeteer = require("puppeteer-extra");
-//imports puppeteer plugin, makes it harder for websites to detect what is going on
-//const StealthPlugin = require("puppeteer-extra-plugin-stealth");
-
-//puppeteer.use(StealthPlugin());
-
-const product_url =
-  "https://www.stanley1913.com/products/winterscape-quencher-h2-0-flowstate-tumbler-40-oz?variant=44559799746687";
-
 const SHOPIFY_GRAPHQL_URL =
   "https://stanley-pmi.myshopify.com/api/2025-01/graphql.json";
 const STORE_ACCESS_TOKEN = "eecaa4fbf8df42ffe25fac400b1ce513";
@@ -163,56 +154,80 @@ async function fillOutShippingInfo(cartID, shippingAddress) {
   return shippingPage;
 }
 
-async function selectShippingMethod(cartID, deliveryGroupId, deliveryHandle) {
-  const mutation = ` mutation SelectDeliveryOption($cartId: ID!, $deliveryGroupId: ID!, $handle: String!) {
-    cartSelectedDeliveryOptionsUpdate(
-      cartId: $cartId
-      selectedDeliveryOptions: [{ deliveryGroupId: $deliveryGroupId, handle: $handle }]
-    ) {
-      cart {
-        id
-        checkoutUrl
+// async function selectShippingMethod(cartID, deliveryGroupId, deliveryHandle) {
+//   const mutation = ` mutation SelectDeliveryOption($cartId: ID!, $deliveryGroupId: ID!, $handle: String!) {
+//     cartSelectedDeliveryOptionsUpdate(
+//       cartId: $cartId
+//       selectedDeliveryOptions: [{ deliveryGroupId: $deliveryGroupId, handle: $handle }]
+//     ) {
+//       cart {
+//         id
+//         checkoutUrl
+//       }
+//       userErrors {
+//         message
+//       }
+//     }
+//   }`;
+
+//   const variables = {
+//     cartId: cartID,
+//     deliveryGroupId,
+//     handle: deliveryHandle,
+//   };
+
+//   const data = await shopifyRequest(mutation, variables);
+//   const cart = data.data.cartSelectedDeliveryOptionsUpdate.cart;
+//   console.log("✅ Shipping method selected:", JSON.stringify(cart, null, 2));
+//   return cart;
+// }
+
+async function puppeteerPaymentCheckout(shippingUrl, page) {
+  await page.goto(shippingUrl, { waitUntil: "domcontentloaded" });
+  const creditCardInfo = [
+    {
+      iframe: "iframe[id^='card-fields-number']",
+      selector: "input[id='number']",
+      value: "4539781755627228",
+    },
+    {
+      iframe: "iframe[id^='card-fields-expiry']",
+      selector: "input[id='expiry']",
+      value: "05/31",
+    },
+    {
+      iframe: "iframe[id^='card-fields-verification_value']",
+      selector: "input[id='verification_value']",
+      value: "758",
+    },
+    { iframe: null, selector: "input[id='name']", value: "Bob Chad" }, // outside iframe
+  ];
+
+  for (const { iframe, selector, value } of creditCardInfo) {
+    try {
+      let frame = page;
+
+      if (iframe) {
+        const frameHandle = await page.waitForSelector(iframe, {
+          visible: true,
+          timeout: 10000,
+        });
+        frame = await frameHandle.contentFrame();
       }
-      userErrors {
-        message
-      }
+      await frame.waitForSelector(selector, { visible: true, timeout: 5000 });
+      await frame.type(selector, value);
+    } catch (error) {
+      console.log(`Failed to fill ${error} : ${error.message}`);
     }
-  }`;
+  }
 
-  const variables = {
-    cartId: cartID,
-    deliveryGroupId,
-    handle: deliveryHandle,
-  };
-
-  const data = await shopifyRequest(mutation, variables);
-  const cart = data.data.cartSelectedDeliveryOptionsUpdate.cart;
-  console.log("✅ Shipping method selected:", JSON.stringify(cart, null, 2));
-  return cart;
-}
-
-async function prepareForCheckout(cartID) {
-  const mutation = `
-  mutation PrepareCart($cartId: ID!) {
-    cartPrepareForCompletion(cartId: $cartId) {
-      cart {
-        id
-        checkoutUrl
-      }
-      userErrors {
-        field
-        message
-      }
-    }
-  }`;
-
-  const data = await shopifyRequest(mutation, { cartId: cartID });
-  const cart = data.data.cartPrepareForCompletion.cart;
-  console.log(
-    "✅ Cart prepared for checkout:\n",
-    JSON.stringify(cart, null, 2)
+  const continueToPayment = await page.waitForSelector(
+    "::-p-xpath(//button[.//span[text()='Pay now']])"
   );
-  return cart;
+
+  await continueToPayment.evaluate((el) => el.scrollIntoView());
+
+  await continueToPayment.evaluate((el) => el.click());
 }
 
 async function run() {
@@ -230,10 +245,15 @@ async function run() {
       phone: "+15555555555",
     });
     //open checkout in browser
-    const checkoutUrl = cart.checkoutUrl;
+
+    const { browser, page } = await getPage();
     const shippingUrl = shippingPage.checkoutUrl;
+
     console.log(`Opening checkout page:\n${shippingUrl}`);
-    await open(shippingUrl);
+
+    await puppeteerPaymentCheckout(shippingUrl, page);
+
+    //await open(shippingUrl);
   } catch (error) {
     console.error("Error in shopify flow" + error);
   }
@@ -242,20 +262,3 @@ async function run() {
 }
 
 run();
-
-// fetch("https://stanley-pmi.myshopify.com/api/2025-01/graphql.json", {
-//   headers: {
-//     accept: "application/json",
-//     "content-type": "application/json",
-//     "sec-ch-ua":
-//       '"Not;A=Brand";v="99", "Google Chrome";v="139", "Chromium";v="139"',
-//     "sec-ch-ua-mobile": "?0",
-//     "sec-ch-ua-platform": '"macOS"',
-//     "x-sdk-variant": "storefront-api-client",
-//     "x-sdk-version": "1.0.2",
-//     "x-shopify-storefront-access-token": "eecaa4fbf8df42ffe25fac400b1ce513",
-//     Referer: "https://www.stanley1913.com/",
-//   },
-//   body: '{"query":"\\n    query getCartVariants($ids: [ID!]!) {\\n      nodes(ids: $ids) {\\n        ... on ProductVariant {\\n          id\\n          price {\\n            amount\\n            currencyCode\\n          }\\n          compareAtPrice {\\n            amount\\n            currencyCode\\n          }\\n          metafield(namespace: \\"custom\\", key: \\"minmax_ignite\\") {\\n            key\\n            value\\n          }\\n          product {\\n            metafield(namespace: \\"minmaxify\\", key: \\"limits\\") {\\n              key\\n              value\\n            }\\n          }\\n        }\\n      }\\n    }\\n  ","variables":{"ids":["gid://shopify/ProductVariant/44559799746687"]}}',
-//   method: "POST",
-// });

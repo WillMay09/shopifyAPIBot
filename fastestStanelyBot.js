@@ -1,5 +1,6 @@
 import fetch from "node-fetch";
 import open from "open";
+import puppeteer from "puppeteer";
 
 //const puppeteer = require("puppeteer-extra");
 //imports puppeteer plugin, makes it harder for websites to detect what is going on
@@ -35,9 +36,16 @@ async function shopifyRequest(query, variables = {}) {
       body: JSON.stringify({ query, variables }),
     });
     const data = await response.json();
+    console.log("Full Shopify Rsponse: \n", JSON.stringify(data, null, 2));
+    //check for graphql errors
+    if (data.errors) {
+      console.error("Shopify GraphQL Errors:", data.errors);
+      throw new Error("Shopify API returned errors");
+    }
     return data;
   } catch (e) {
     console.log("Shopify request error" + e);
+    throw e;
   }
 }
 
@@ -73,15 +81,159 @@ async function addProductToCart() {
   return cart;
 }
 
+async function fillOutShippingInfo(cartID, shippingAddress) {
+  const mutation = `mutation AddDeliveryAddressAndBuyerInfo {
+  cartDeliveryAddressesAdd(
+    cartId: "gid://shopify/Cart/hWN47PkTz38JcBtFbRKxe1aM?key=65c8c5db7258b148de9ad96843e48d8f"
+    addresses: [
+      {
+        address: {
+          deliveryAddress: {
+            firstName: "John"
+            lastName: "Jones"
+            address1: "3818 Richmond Ave"
+            city: "Houston"
+            provinceCode: "TX"
+            countryCode: US
+            zip: "77044"
+          }
+        }
+      }
+    ]
+  ) {
+    cart {
+      id
+      checkoutUrl
+      totalQuantity
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+
+  cartBuyerIdentityUpdate(
+    cartId: "gid://shopify/Cart/hWN47PkTz38JcBtFbRKxe1aM?key=65c8c5db7258b148de9ad96843e48d8f"
+    buyerIdentity: {
+      email: "john.jones@example.com"
+      phone: "+17135551234"
+      countryCode: US
+    }
+  ) {
+    cart {
+      id
+      buyerIdentity {
+        email
+        phone
+      }
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}`;
+
+  const variables = {
+    cartId: cartID,
+    addresses: [
+      {
+        address: {
+          address1: shippingAddress.address1,
+          city: shippingAddress.city,
+          provinceCode: shippingAddress.provinceCode,
+          countryCode: shippingAddress.countryCode,
+          zip: shippingAddress.zip,
+          firstName: shippingAddress.firstName,
+          lastName: shippingAddress.lastName,
+          phone: shippingAddress.phone,
+        },
+      },
+    ],
+  };
+
+  const data = await shopifyRequest(mutation);
+
+  const shippingPage = data.data.cartDeliveryAddressesAdd.cart;
+
+  console.log(
+    "shipping info filled out" + JSON.stringify(shippingPage, null, 2)
+  );
+
+  return shippingPage;
+}
+
+async function selectShippingMethod(cartID, deliveryGroupId, deliveryHandle) {
+  const mutation = ` mutation SelectDeliveryOption($cartId: ID!, $deliveryGroupId: ID!, $handle: String!) {
+    cartSelectedDeliveryOptionsUpdate(
+      cartId: $cartId
+      selectedDeliveryOptions: [{ deliveryGroupId: $deliveryGroupId, handle: $handle }]
+    ) {
+      cart {
+        id
+        checkoutUrl
+      }
+      userErrors {
+        message
+      }
+    }
+  }`;
+
+  const variables = {
+    cartId: cartID,
+    deliveryGroupId,
+    handle: deliveryHandle,
+  };
+
+  const data = await shopifyRequest(mutation, variables);
+  const cart = data.data.cartSelectedDeliveryOptionsUpdate.cart;
+  console.log("✅ Shipping method selected:", JSON.stringify(cart, null, 2));
+  return cart;
+}
+
+async function prepareForCheckout(cartID) {
+  const mutation = `
+  mutation PrepareCart($cartId: ID!) {
+    cartPrepareForCompletion(cartId: $cartId) {
+      cart {
+        id
+        checkoutUrl
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }`;
+
+  const data = await shopifyRequest(mutation, { cartId: cartID });
+  const cart = data.data.cartPrepareForCompletion.cart;
+  console.log(
+    "✅ Cart prepared for checkout:\n",
+    JSON.stringify(cart, null, 2)
+  );
+  return cart;
+}
+
 async function run() {
   try {
     console.log("Starting Shopify cart flow...");
     const cart = await addProductToCart();
-
+    const shippingPage = await fillOutShippingInfo(cart.id, {
+      firstName: "Test",
+      lastName: "User",
+      address1: "3886 Richmond Ave.",
+      city: "Houston",
+      provinceCode: "TX",
+      countryCode: "United States",
+      zip: "77046",
+      phone: "+15555555555",
+    });
     //open checkout in browser
     const checkoutUrl = cart.checkoutUrl;
-    console.log(`Opening checkout page:\n${checkoutUrl}`);
-    await open(checkoutUrl);
+    const shippingUrl = shippingPage.checkoutUrl;
+    console.log(`Opening checkout page:\n${shippingUrl}`);
+    await open(shippingUrl);
   } catch (error) {
     console.error("Error in shopify flow" + error);
   }

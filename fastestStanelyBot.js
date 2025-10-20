@@ -17,6 +17,10 @@ async function getPage() {
 //helper function
 //sends post request
 async function shopifyRequest(query, variables = {}, prevCookies = "") {
+  console.log("\n🟢 ---- NEW GRAPHQL REQUEST ----");
+  console.log("➡️ Request Cookies Sent:", prevCookies || "(none)");
+  console.log("➡️ Variables:", JSON.stringify(variables, null, 2));
+
   try {
     const response = await fetch(SHOPIFY_GRAPHQL_URL, {
       method: "POST",
@@ -29,18 +33,26 @@ async function shopifyRequest(query, variables = {}, prevCookies = "") {
       body: JSON.stringify({ query, variables }),
     });
     //return an array of set cookie headers
-    const setCookie = response.headers.raw()["set-cookie"] || [];
+    const setCookieHeaders = response.headers.raw()["set-cookie"] || [];
+    console.log("Raw Set-Cookie Headers from Shopify:", setCookieHeaders);
+
     //all key value pairs are joined on a single cookie
-    const newCookies = setCookie.map((c) => c.split(";")[0]).join("; ");
+    const newCookies = setCookieHeaders.map((c) => c.split(";")[0]).join("; ");
+    console.log("Parsed New Cookies:", newCookies || "(none)");
+
     const data = await response.json();
+
     console.log("Full Shopify Rsponse: \n", JSON.stringify(data, null, 2));
     //check for graphql errors
     if (data.errors) {
       console.error("Shopify GraphQL Errors:", data.errors);
       throw new Error("Shopify API returned errors");
     }
+    const mergedCookies = [prevCookies, newCookies].filter(Boolean).join("; ");
+    console.log("Merged Cookies (to be reused):", mergedCookies);
+
     //return data + new cookie string
-    return { data, cookies: newCookies };
+    return { data, cookies: mergedCookies };
   } catch (e) {
     console.log("Shopify request error" + e);
     throw e;
@@ -80,98 +92,93 @@ async function addProductToCart() {
 }
 
 async function fillOutShippingInfo(cartID, shippingAddress, cookies) {
-  const mutation = `mutation AddDeliveryAddressAndBuyerInfo {
-  cartDeliveryAddressesAdd(
-    cartId: "gid://shopify/Cart/hWN47PkTz38JcBtFbRKxe1aM?key=65c8c5db7258b148de9ad96843e48d8f"
-    addresses: [
-      {
-        address: {
-          deliveryAddress: {
-            firstName: "John"
-            lastName: "Jones"
-            address1: "3818 Richmond Ave"
-            city: "Houston"
-            provinceCode: "TX"
-            countryCode: US
-            zip: "77044"
-          }
+  const mutation = `
+    mutation AddDeliveryAddressAndBuyerInfo($cartId: ID!, $addresses: [CartSelectableAddressInput!]!) {
+      cartDeliveryAddressesAdd(
+        cartId: $cartId
+        addresses: $addresses
+      ) {
+        cart {
+          id
+          checkoutUrl
+          totalQuantity
+        }
+        userErrors {
+          field
+          message
         }
       }
-    ]
-  ) {
-    cart {
-      id
-      checkoutUrl
-      totalQuantity
-    }
-    userErrors {
-      field
-      message
-    }
-  }
 
-  cartBuyerIdentityUpdate(
-    cartId: "gid://shopify/Cart/hWN47PkTz38JcBtFbRKxe1aM?key=65c8c5db7258b148de9ad96843e48d8f"
-    buyerIdentity: {
-      email: "john.jones@example.com"
-      phone: "+17135551234"
-      countryCode: US
-    }
-  ) {
-    cart {
-      id
-      buyerIdentity {
-        email
-        phone
+      cartBuyerIdentityUpdate(
+        cartId: $cartId
+        buyerIdentity: {
+          email: "john.jones@example.com"
+          phone: "+17135551234"
+          countryCode: US
+        }
+      ) {
+        cart {
+          id
+          buyerIdentity {
+            email
+            phone
+          }
+        }
+        userErrors {
+          field
+          message
+        }
       }
     }
-    userErrors {
-      field
-      message
-    }
-  }
-}`;
+  `;
 
   const variables = {
     cartId: cartID,
     addresses: [
       {
         address: {
-          address1: shippingAddress.address1,
-          city: shippingAddress.city,
-          provinceCode: shippingAddress.provinceCode,
-          countryCode: shippingAddress.countryCode,
-          zip: shippingAddress.zip,
-          firstName: shippingAddress.firstName,
-          lastName: shippingAddress.lastName,
-          phone: shippingAddress.phone,
+          deliveryAddress: {
+            firstName: shippingAddress.firstName,
+            lastName: shippingAddress.lastName,
+            address1: shippingAddress.address1,
+            city: shippingAddress.city,
+            provinceCode: shippingAddress.provinceCode,
+            countryCode: shippingAddress.countryCode,
+            zip: shippingAddress.zip,
+          },
         },
       },
     ],
   };
 
-  const { data, newCookies } = await shopifyRequest(
+  const { data, cookies: newCookies } = await shopifyRequest(
     mutation,
-    undefined,
+    variables,
     cookies
   );
 
-  const shippingPage = data.data.cartDeliveryAddressesAdd.cart;
+  const cartData = data.data.cartDeliveryAddressesAdd?.cart;
 
-  console.log(
-    "shipping info filled out" + JSON.stringify(shippingPage, null, 2)
-  );
+  console.log("----------Shipping Info Graphql Response -------------------");
+  console.log(JSON.stringify(data, null, 2));
 
-  return { shippingPage, cookies: newCookies };
+  console.log("✅ Shipping info successfully filled out");
+  console.log("➡️ Checkout URL:", cartData.checkoutUrl);
+
+  return { shippingPage: cartData, cookies: newCookies };
 }
 
 //formats the cookies correctly, puppeteer expects array of cookie objects
 //with fields name, value, domain etc
 async function setCookiesForPuppeteer(page, cookieString) {
+  console.log("\n🟣 ---- SETTING COOKIES IN PUPPETEER ----");
+
   if (!cookieString) {
     console.warn("No cookies provided to Puppeteer");
     return;
   }
+
+  console.log("➡️ Original Cookie String:", cookieString);
   const cookies = cookieString.split("; ").map((c) => {
     const [name, value] = c.split("=");
     return {
@@ -185,7 +192,10 @@ async function setCookiesForPuppeteer(page, cookieString) {
   });
   //puppeteer's checkout session sees the same cookies that where present
   //in graphql request
+  console.log("Formatted Puppeteer Cookies:", cookies);
+
   await page.setCookie(...cookies);
+  console.log("✅ Cookies successfully applied to Puppeteer session");
 }
 
 async function puppeteerPaymentCheckout(shippingUrl, page) {
@@ -249,7 +259,7 @@ async function run() {
         address1: "3886 Richmond Ave.",
         city: "Houston",
         provinceCode: "TX",
-        countryCode: "United States",
+        countryCode: "US",
         zip: "77046",
         phone: "+15555555555",
       },
@@ -264,7 +274,7 @@ async function run() {
 
     console.log(`Opening checkout page:\n${shippingUrl}`);
 
-    await puppeteerPaymentCheckout(shippingUrl, page);
+    //await puppeteerPaymentCheckout(shippingUrl, page);
 
     //await open(shippingUrl);
   } catch (error) {

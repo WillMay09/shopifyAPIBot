@@ -15,7 +15,8 @@ async function getPage() {
   return { browser, page };
 }
 //helper function
-async function shopifyRequest(query, variables = {}) {
+//sends post request
+async function shopifyRequest(query, variables = {}, prevCookies = "") {
   try {
     const response = await fetch(SHOPIFY_GRAPHQL_URL, {
       method: "POST",
@@ -23,9 +24,14 @@ async function shopifyRequest(query, variables = {}) {
         accept: "application/json",
         "content-type": "application/json",
         "x-shopify-storefront-access-token": STORE_ACCESS_TOKEN,
+        cookie: prevCookies,
       },
       body: JSON.stringify({ query, variables }),
     });
+    //return an array of set cookie headers
+    const setCookie = response.headers.raw()["set-cookie"] || [];
+    //all key value pairs are joined on a single cookie
+    const newCookies = setCookie.map((c) => c.split(";")[0]).join("; ");
     const data = await response.json();
     console.log("Full Shopify Rsponse: \n", JSON.stringify(data, null, 2));
     //check for graphql errors
@@ -33,7 +39,8 @@ async function shopifyRequest(query, variables = {}) {
       console.error("Shopify GraphQL Errors:", data.errors);
       throw new Error("Shopify API returned errors");
     }
-    return data;
+    //return data + new cookie string
+    return { data, cookies: newCookies };
   } catch (e) {
     console.log("Shopify request error" + e);
     throw e;
@@ -65,14 +72,14 @@ async function addProductToCart() {
   const variables = {
     lines: [{ merchandiseId: PRODUCT_VARIENT_ID, quantity: 1 }],
   };
-  const data = await shopifyRequest(query, variables);
+  const { data, cookies } = await shopifyRequest(query, variables);
   const cart = data.data.cartCreate.cart;
 
   console.log("Cart created", JSON.stringify(cart, null, 2));
-  return cart;
+  return { cart, cookies };
 }
 
-async function fillOutShippingInfo(cartID, shippingAddress) {
+async function fillOutShippingInfo(cartID, shippingAddress, cookies) {
   const mutation = `mutation AddDeliveryAddressAndBuyerInfo {
   cartDeliveryAddressesAdd(
     cartId: "gid://shopify/Cart/hWN47PkTz38JcBtFbRKxe1aM?key=65c8c5db7258b148de9ad96843e48d8f"
@@ -143,7 +150,11 @@ async function fillOutShippingInfo(cartID, shippingAddress) {
     ],
   };
 
-  const data = await shopifyRequest(mutation);
+  const { data, newCookies } = await shopifyRequest(
+    mutation,
+    undefined,
+    cookies
+  );
 
   const shippingPage = data.data.cartDeliveryAddressesAdd.cart;
 
@@ -151,39 +162,34 @@ async function fillOutShippingInfo(cartID, shippingAddress) {
     "shipping info filled out" + JSON.stringify(shippingPage, null, 2)
   );
 
-  return shippingPage;
+  return { shippingPage, cookies: newCookies };
 }
 
-// async function selectShippingMethod(cartID, deliveryGroupId, deliveryHandle) {
-//   const mutation = ` mutation SelectDeliveryOption($cartId: ID!, $deliveryGroupId: ID!, $handle: String!) {
-//     cartSelectedDeliveryOptionsUpdate(
-//       cartId: $cartId
-//       selectedDeliveryOptions: [{ deliveryGroupId: $deliveryGroupId, handle: $handle }]
-//     ) {
-//       cart {
-//         id
-//         checkoutUrl
-//       }
-//       userErrors {
-//         message
-//       }
-//     }
-//   }`;
-
-//   const variables = {
-//     cartId: cartID,
-//     deliveryGroupId,
-//     handle: deliveryHandle,
-//   };
-
-//   const data = await shopifyRequest(mutation, variables);
-//   const cart = data.data.cartSelectedDeliveryOptionsUpdate.cart;
-//   console.log("✅ Shipping method selected:", JSON.stringify(cart, null, 2));
-//   return cart;
-// }
+//formats the cookies correctly, puppeteer expects array of cookie objects
+//with fields name, value, domain etc
+async function setCookiesForPuppeteer(page, cookieString) {
+  if (!cookieString) {
+    console.warn("No cookies provided to Puppeteer");
+    return;
+  }
+  const cookies = cookieString.split("; ").map((c) => {
+    const [name, value] = c.split("=");
+    return {
+      name,
+      value,
+      domain: ".myshopify.com",
+      path: "/",
+      httpOnly: false,
+      secure: true,
+    };
+  });
+  //puppeteer's checkout session sees the same cookies that where present
+  //in graphql request
+  await page.setCookie(...cookies);
+}
 
 async function puppeteerPaymentCheckout(shippingUrl, page) {
-  await page.goto(shippingUrl, { waitUntil: "domcontentloaded" });
+  await page.goto(shippingUrl, { waitUntil: "networkidle2" });
   const creditCardInfo = [
     {
       iframe: "iframe[id^='card-fields-number']",
@@ -232,21 +238,28 @@ async function puppeteerPaymentCheckout(shippingUrl, page) {
 
 async function run() {
   try {
+    const { browser, page } = await getPage();
     console.log("Starting Shopify cart flow...");
-    const cart = await addProductToCart();
-    const shippingPage = await fillOutShippingInfo(cart.id, {
-      firstName: "Test",
-      lastName: "User",
-      address1: "3886 Richmond Ave.",
-      city: "Houston",
-      provinceCode: "TX",
-      countryCode: "United States",
-      zip: "77046",
-      phone: "+15555555555",
-    });
+    const { cart, cookies } = await addProductToCart();
+    let { shippingPage, cookies: updatedCookies } = await fillOutShippingInfo(
+      cart.id,
+      {
+        firstName: "Test",
+        lastName: "User",
+        address1: "3886 Richmond Ave.",
+        city: "Houston",
+        provinceCode: "TX",
+        countryCode: "United States",
+        zip: "77046",
+        phone: "+15555555555",
+      },
+      cookies
+    );
+
+    //format cookies for puppeteer
+    await setCookiesForPuppeteer(page, updatedCookies);
     //open checkout in browser
 
-    const { browser, page } = await getPage();
     const shippingUrl = shippingPage.checkoutUrl;
 
     console.log(`Opening checkout page:\n${shippingUrl}`);
